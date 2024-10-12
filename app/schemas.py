@@ -2,6 +2,7 @@
 
 from pydantic import BaseModel
 from datetime import datetime
+from typing import Optional
 
 class UserCreate(BaseModel):
     username: str
@@ -27,10 +28,10 @@ class MessageResponse(BaseModel):
     id: int
     sender_id: int
     receiver_id: int
-    sender_username: str  # Имя отправителя
-    receiver_username: str  # Имя получателя
     content: str
     timestamp: datetime
+    sender_username: Optional[str]
+    receiver_username: Optional[str]
 
     class Config:
         from_attributes = True

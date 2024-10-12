@@ -9,8 +9,8 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
-    username = Column(String, unique=True, index=True)
-    hashed_password = Column(String)
+    username = Column(String, unique=True, index=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
 
     # Связи для сообщений, отправленных и полученных пользователем
     sent_messages = relationship("Message", foreign_keys="Message.sender_id", back_populates="sender")
@@ -24,7 +24,7 @@ class Message(Base):
     sender_id = Column(Integer, ForeignKey('users.id'), nullable=False)
     receiver_id = Column(Integer, ForeignKey('users.id'), nullable=False)
     content = Column(String, nullable=False)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     # Связи с пользователем
     sender = relationship("User", foreign_keys=[sender_id], back_populates="sent_messages")
