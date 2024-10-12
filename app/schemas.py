@@ -20,11 +20,15 @@ class UserLogin(BaseModel):
 
 class MessageCreate(BaseModel):
     sender_id: int
+    receiver_id: int
     content: str
 
 class MessageResponse(BaseModel):
     id: int
     sender_id: int
+    receiver_id: int
+    sender_username: str  # Имя отправителя
+    receiver_username: str  # Имя получателя
     content: str
     timestamp: datetime
 

@@ -116,7 +116,7 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.initUI()
-        self.load_messages()  # Загружаем сообщения при запуске окна
+        self.load_contacts()  # Загружаем список контактов при запуске окна
 
     def initUI(self):
         self.setWindowTitle("Chat Application")
@@ -124,10 +124,18 @@ class MainWindow(QWidget):
 
         main_layout = QHBoxLayout(self)
 
-        # Левая панель для списка контактов
-        contact_list = QListWidget()
-        contact_list.addItems(["User 1", "User 2", "User 3"])
-        contact_list.setFixedWidth(200)
+        # Левая панель для поиска и списка контактов
+        contact_layout = QVBoxLayout()
+
+        # Поле поиска
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search users...")
+        self.search_input.textChanged.connect(self.search_users)  # Связываем ввод с методом поиска
+        contact_layout.addWidget(self.search_input)
+
+        # Список контактов
+        self.contact_list = QListWidget()
+        contact_layout.addWidget(self.contact_list)
 
         # Правая панель для чата
         chat_layout = QVBoxLayout()
@@ -135,7 +143,7 @@ class MainWindow(QWidget):
         self.chat_display.setReadOnly(True)
         chat_layout.addWidget(self.chat_display)
 
-        # Нижняя панель для ввода сообщения
+        # Поле ввода сообщения и кнопка отправки
         message_layout = QHBoxLayout()
         self.message_input = QLineEdit()
         self.send_button = QPushButton("Send")
@@ -144,9 +152,11 @@ class MainWindow(QWidget):
         message_layout.addWidget(self.send_button)
         chat_layout.addLayout(message_layout)
 
-        # Разделитель контактов и чата
+        # Разделитель для списка контактов и окна чата
         splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(contact_list)
+        contact_container = QWidget()
+        contact_container.setLayout(contact_layout)
+        splitter.addWidget(contact_container)
         chat_container = QWidget()
         chat_container.setLayout(chat_layout)
         splitter.addWidget(chat_container)
@@ -155,20 +165,37 @@ class MainWindow(QWidget):
         main_layout.addWidget(splitter)
         self.setLayout(main_layout)
 
-    def load_messages(self):
-        response = requests.get("http://127.0.0.1:8000/messages/")
+    def load_contacts(self):
+        # Загрузка начального списка контактов
+        response = requests.get("http://127.0.0.1:8000/users/")
         if response.status_code == 200:
-            messages = response.json()
-            for message in messages:
-                self.chat_display.append(f"{message['sender_id']}: {message['content']}")
+            users = response.json()
+            self.contact_list.clear()
+            for user in users:
+                self.contact_list.addItem(user['username'])
         else:
-            QMessageBox.warning(self, "Error", "Failed to load messages")
+            QMessageBox.warning(self, "Error", "Failed to load contacts")
+
+    def search_users(self):
+        query = self.search_input.text()
+        response = requests.get(f"http://127.0.0.1:8000/users?query={query}")
+        if response.status_code == 200:
+            users = response.json()
+            self.contact_list.clear()
+            for user in users:
+                self.contact_list.addItem(user['username'])
+        else:
+            QMessageBox.warning(self, "Error", "Failed to search users")
 
     def send_message(self):
         message = self.message_input.text()
+        receiver_id = 2  # Временно установите ID получателя, например, `2`
+        sender_id = 1  # Укажите ID текущего пользователя
+
         if message:
             response = requests.post("http://127.0.0.1:8000/messages/", json={
-                "sender_id": 1,  # Временно указываем ID отправителя
+                "sender_id": sender_id,
+                "receiver_id": receiver_id,
                 "content": message
             })
             if response.status_code == 200:
