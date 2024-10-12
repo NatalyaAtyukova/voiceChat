@@ -116,23 +116,21 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.initUI()
+        self.load_messages()  # Загружаем сообщения при запуске окна
 
     def initUI(self):
         self.setWindowTitle("Chat Application")
         self.setGeometry(100, 100, 800, 600)
 
-        # Основной макет
         main_layout = QHBoxLayout(self)
 
         # Левая панель для списка контактов
         contact_list = QListWidget()
-        contact_list.addItems(["User 1", "User 2", "User 3"])  # Пример пользователей
+        contact_list.addItems(["User 1", "User 2", "User 3"])
         contact_list.setFixedWidth(200)
 
         # Правая панель для чата
         chat_layout = QVBoxLayout()
-
-        # Поле для отображения сообщений
         self.chat_display = QTextEdit()
         self.chat_display.setReadOnly(True)
         chat_layout.addWidget(self.chat_display)
@@ -144,7 +142,6 @@ class MainWindow(QWidget):
         self.send_button.clicked.connect(self.send_message)
         message_layout.addWidget(self.message_input)
         message_layout.addWidget(self.send_button)
-
         chat_layout.addLayout(message_layout)
 
         # Разделитель контактов и чата
@@ -158,12 +155,27 @@ class MainWindow(QWidget):
         main_layout.addWidget(splitter)
         self.setLayout(main_layout)
 
+    def load_messages(self):
+        response = requests.get("http://127.0.0.1:8000/messages/")
+        if response.status_code == 200:
+            messages = response.json()
+            for message in messages:
+                self.chat_display.append(f"{message['sender_id']}: {message['content']}")
+        else:
+            QMessageBox.warning(self, "Error", "Failed to load messages")
+
     def send_message(self):
         message = self.message_input.text()
         if message:
-            self.chat_display.append(f"You: {message}")
-            self.message_input.clear()
-
+            response = requests.post("http://127.0.0.1:8000/messages/", json={
+                "sender_id": 1,  # Временно указываем ID отправителя
+                "content": message
+            })
+            if response.status_code == 200:
+                self.chat_display.append(f"You: {message}")
+                self.message_input.clear()
+            else:
+                QMessageBox.warning(self, "Error", "Failed to send message")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
