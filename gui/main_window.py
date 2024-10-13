@@ -42,7 +42,7 @@ class MainWindow(QWidget):
         # Таймер для проверки новых запросов на дружбу
         self.friend_request_timer = QTimer(self)
         self.friend_request_timer.timeout.connect(self.load_friend_requests)
-        self.friend_request_timer.start(30000)  # Проверка каждые 30 секунд
+        self.friend_request_timer.start(5000)  # Проверка каждые 30 секунд
 
     def initUI(self):
         self.setWindowTitle("Chat Application")
@@ -207,38 +207,77 @@ class MainWindow(QWidget):
             QMessageBox.warning(self, "Error", f"Failed to connect to server: {e}")
 
     def load_friend_requests(self):
-        # Запрашиваем запросы на добавление в друзья для текущего пользователя
+        # Track processed request IDs to avoid duplicate display
+        if not hasattr(self, 'processed_request_ids'):
+            self.processed_request_ids = set()
+
         response = requests.get(f"http://127.0.0.1:8000/friend_requests/{self.user_id}")
         if response.status_code == 200:
             friend_requests = response.json()
             for req in friend_requests:
-                self.show_friend_request(req["sender_id"], req["sender_username"])
+                if req["id"] not in self.processed_request_ids:
+                    self.show_friend_request(req["sender_id"], req["sender_username"])
+                    self.processed_request_ids.add(req["id"])
         else:
             QMessageBox.warning(self, "Error", "Failed to load friend requests")
 
     def show_friend_request(self, sender_id, sender_username):
-        # Показ уведомления с запросом на добавление в друзья
-        message = f"{sender_username} has sent you a friend request."
+        # Dictionary to track request items by sender_id
+        if not hasattr(self, 'friend_request_items'):
+            self.friend_request_items = {}
+
+        # Show friend request message in chat display
+        request_message = f"{sender_username} has sent you a friend request."
+        item = QListWidgetItem(request_message)
+        self.chat_display.addItem(item)
+
+        # Accept and reject buttons
         accept_button = QPushButton("Accept")
         reject_button = QPushButton("Reject")
-        accept_button.clicked.connect(lambda: self.accept_friend_request(sender_id))
-        reject_button.clicked.connect(lambda: self.reject_friend_request(sender_id))
-        QMessageBox.information(self, "Friend Request", message)
+
+        # Connect buttons and pass sender_id to the functions
+        accept_button.clicked.connect(lambda _, uid=sender_id: self.accept_friend_request(uid))
+        reject_button.clicked.connect(lambda _, uid=sender_id: self.reject_friend_request(uid))
+
+        # Add buttons to display in the chat
+        layout = QHBoxLayout()
+        layout.addWidget(accept_button)
+        layout.addWidget(reject_button)
+        button_widget = QWidget()
+        button_widget.setLayout(layout)
+        button_item = QListWidgetItem()
+        button_item.setSizeHint(button_widget.sizeHint())
+        self.chat_display.addItem(button_item)
+        self.chat_display.setItemWidget(button_item, button_widget)
+
+        # Track both the message and button items to remove them later
+        self.friend_request_items[sender_id] = (item, button_item)
 
     def accept_friend_request(self, sender_id):
-        response = requests.put(f"http://127.0.0.1:8000/friend_requests/{sender_id}", json={"status": "accepted"})
+        response = requests.put(f"http://127.0.0.1:8000/friend_requests/{sender_id}?status=accepted")
         if response.status_code == 200:
             QMessageBox.information(self, "Success", "Friend request accepted")
-            self.load_contacts()  # Обновление списка друзей
+            self.load_contacts()  # Refresh the friend list after accepting
+            self.remove_friend_request_items(sender_id)  # Remove request UI
         else:
-            QMessageBox.warning(self, "Error", "Failed to accept friend request")
+            QMessageBox.warning(self, "Error",
+                                f"Failed to accept friend request: {response.status_code} - {response.text}")
 
     def reject_friend_request(self, sender_id):
-        response = requests.put(f"http://127.0.0.1:8000/friend_requests/{sender_id}", json={"status": "rejected"})
+        response = requests.put(f"http://127.0.0.1:8000/friend_requests/{sender_id}?status=rejected")
         if response.status_code == 200:
             QMessageBox.information(self, "Success", "Friend request rejected")
+            self.remove_friend_request_items(sender_id)  # Remove request UI
         else:
-            QMessageBox.warning(self, "Error", "Failed to reject friend request")
+            QMessageBox.warning(self, "Error",
+                                f"Failed to reject friend request: {response.status_code} - {response.text}")
+
+    def remove_friend_request_items(self, sender_id):
+        # Remove the message and button items related to this friend request
+        if sender_id in self.friend_request_items:
+            request_message_item, button_item = self.friend_request_items.pop(sender_id)
+            self.chat_display.takeItem(self.chat_display.row(request_message_item))
+            self.chat_display.takeItem(self.chat_display.row(button_item))
 
     def search_users(self):
         query = self.search_input.text()
