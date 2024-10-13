@@ -8,7 +8,6 @@ from . import models, schemas
 from .database import SessionLocal, engine, Base
 from passlib.context import CryptContext
 from datetime import datetime
-from .schemas import FriendRequestCreate
 
 app = FastAPI()
 
@@ -91,7 +90,6 @@ def login(user: schemas.UserLogin, db: Session = Depends(get_db)):
 # Добавление друзей
 @app.post("/friends/")
 def add_friend(user_id: int, friend_id: int, db: Session = Depends(get_db)):
-    # Дополните проверку на существование, добавив вывод для отладки
     user = db.query(models.User).filter(models.User.id == user_id).first()
     friend = db.query(models.User).filter(models.User.id == friend_id).first()
 
@@ -99,7 +97,6 @@ def add_friend(user_id: int, friend_id: int, db: Session = Depends(get_db)):
         print(f"User {user_id} or friend {friend_id} not found in database.")
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Проверьте наличие дружбы и добавьте вывод для отладки
     existing_friendship = db.query(models.Friendship).filter(
         models.Friendship.user_id == user_id,
         models.Friendship.friend_id == friend_id
@@ -108,15 +105,14 @@ def add_friend(user_id: int, friend_id: int, db: Session = Depends(get_db)):
         print(f"User {user_id} and friend {friend_id} are already friends.")
         raise HTTPException(status_code=400, detail="Already friends")
 
-    # Добавление в таблицу Friendship
     friendship = models.Friendship(user_id=user_id, friend_id=friend_id)
     db.add(friendship)
     db.commit()
     return {"message": "Friend added successfully"}
 
 @app.post("/friend_requests/")
-def send_friend_request(request: FriendRequestCreate, db: Session = Depends(get_db)):
-    # Используйте request.sender_id и request.receiver_id
+async def send_friend_request(request: schemas.FriendRequestCreate, db: Session = Depends(get_db)):
+    # Проверка существующего запроса
     existing_request = db.query(models.FriendRequest).filter(
         models.FriendRequest.sender_id == request.sender_id,
         models.FriendRequest.receiver_id == request.receiver_id,
@@ -125,13 +121,29 @@ def send_friend_request(request: FriendRequestCreate, db: Session = Depends(get_
     if existing_request:
         raise HTTPException(status_code=400, detail="Friend request already sent")
 
-    # Создание нового запроса на дружбу
+    # Создание запроса на дружбу
     friend_request = models.FriendRequest(sender_id=request.sender_id, receiver_id=request.receiver_id)
     db.add(friend_request)
     db.commit()
     db.refresh(friend_request)
+
+    # Отправка уведомления через WebSocket пользователю-получателю
+    message_data = {
+        "type": "friend_request",
+        "sender_id": request.sender_id,
+        "receiver_id": request.receiver_id,
+        "sender_username": db.query(models.User).filter(models.User.id == request.sender_id).first().username,
+        "message": "You have a new friend request"
+    }
+    await broadcast_message_to_user(request.receiver_id, message_data)
+
     return {"message": "Friend request sent successfully"}
 
+    # Добавление в таблицу Friendship
+    friendship = models.Friendship(user_id=user_id, friend_id=friend_id)
+    db.add(friendship)
+    db.commit()
+    return {"message": "Friend added successfully"}
 
 @app.post("/messages/", response_model=schemas.MessageResponse)
 async def send_message(message: schemas.MessageCreate, db: Session = Depends(get_db)):
@@ -241,6 +253,44 @@ def get_messages(
 
     return message_responses
 
+@app.get("/users/{user_id}/friends/", response_model=List[schemas.UserResponse])
+def get_friends(user_id: int, db: Session = Depends(get_db)):
+    # Получаем всех друзей для заданного user_id
+    friendships = db.query(models.Friendship).filter(
+        (models.Friendship.user_id == user_id) | (models.Friendship.friend_id == user_id)
+    ).all()
+
+    # Извлекаем ID друзей
+    friend_ids = [f.friend_id if f.user_id == user_id else f.user_id for f in friendships]
+    friends = db.query(models.User).filter(models.User.id.in_(friend_ids)).all()
+
+    return friends
+
+
+@app.get("/friend_requests/{user_id}", response_model=List[schemas.FriendRequestResponse])
+def get_friend_requests(user_id: int, db: Session = Depends(get_db)):
+    # Получение всех запросов на дружбу, направленных указанному пользователю
+    friend_requests = db.query(models.FriendRequest).filter(
+        models.FriendRequest.receiver_id == user_id,
+        models.FriendRequest.status == "pending"
+    ).all()
+
+    # Добавление имен отправителя и получателя
+    friend_request_responses = []
+    for request in friend_requests:
+        sender = db.query(models.User).filter(models.User.id == request.sender_id).first()
+        receiver = db.query(models.User).filter(models.User.id == request.receiver_id).first()
+        friend_request_responses.append(schemas.FriendRequestResponse(
+            id=request.id,
+            sender_id=request.sender_id,
+            receiver_id=request.receiver_id,
+            status=request.status,
+            timestamp=request.timestamp,
+            sender_username=sender.username if sender else "Unknown",
+            receiver_username=receiver.username if receiver else "Unknown"
+        ))
+    return friend_request_responses
+
 @app.put("/friend_requests/{request_id}")
 def respond_to_friend_request(request_id: int, status: str, db: Session = Depends(get_db)):
     # Поиск запроса на добавление в друзья
@@ -273,3 +323,5 @@ def respond_to_friend_request(request_id: int, status: str, db: Session = Depend
 
     # Если запрос отклонен, возвращаем сообщение об успешном отклонении
     return {"message": f"Friend request {status}"}
+
+
