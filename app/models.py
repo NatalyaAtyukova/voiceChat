@@ -1,6 +1,6 @@
 # app/models.py
 
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.database import Base
@@ -29,3 +29,29 @@ class Message(Base):
     # Связи с пользователем
     sender = relationship("User", foreign_keys=[sender_id], back_populates="sent_messages")
     receiver = relationship("User", foreign_keys=[receiver_id], back_populates="received_messages")
+
+
+class Friendship(Base):
+    __tablename__ = "friendships"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    friend_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    user = relationship("User", foreign_keys=[user_id], backref="friends")
+    friend = relationship("User", foreign_keys=[friend_id])
+
+    # Уникальность пары (user_id, friend_id) чтобы избежать дублирования
+    __table_args__ = (UniqueConstraint('user_id', 'friend_id', name='unique_friendship'),)
+
+class FriendRequest(Base):
+    __tablename__ = "friend_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sender_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    receiver_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    status = Column(String, default="pending")  # Статус запроса: "pending", "accepted", "rejected"
+    timestamp = Column(DateTime, default=datetime.utcnow)
+
+    sender = relationship("User", foreign_keys=[sender_id])
+    receiver = relationship("User", foreign_keys=[receiver_id])

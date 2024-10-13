@@ -8,6 +8,7 @@ from . import models, schemas
 from .database import SessionLocal, engine, Base
 from passlib.context import CryptContext
 from datetime import datetime
+from .schemas import FriendRequestCreate
 
 app = FastAPI()
 
@@ -86,6 +87,50 @@ def login(user: schemas.UserLogin, db: Session = Depends(get_db)):
     if not db_user or not verify_password(user.password, db_user.hashed_password):
         raise HTTPException(status_code=400, detail="Incorrect username or password")
     return {"message": "Login successful", "user_id": db_user.id}
+
+# Добавление друзей
+@app.post("/friends/")
+def add_friend(user_id: int, friend_id: int, db: Session = Depends(get_db)):
+    # Дополните проверку на существование, добавив вывод для отладки
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    friend = db.query(models.User).filter(models.User.id == friend_id).first()
+
+    if not user or not friend:
+        print(f"User {user_id} or friend {friend_id} not found in database.")
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Проверьте наличие дружбы и добавьте вывод для отладки
+    existing_friendship = db.query(models.Friendship).filter(
+        models.Friendship.user_id == user_id,
+        models.Friendship.friend_id == friend_id
+    ).first()
+    if existing_friendship:
+        print(f"User {user_id} and friend {friend_id} are already friends.")
+        raise HTTPException(status_code=400, detail="Already friends")
+
+    # Добавление в таблицу Friendship
+    friendship = models.Friendship(user_id=user_id, friend_id=friend_id)
+    db.add(friendship)
+    db.commit()
+    return {"message": "Friend added successfully"}
+
+@app.post("/friend_requests/")
+def send_friend_request(request: FriendRequestCreate, db: Session = Depends(get_db)):
+    # Используйте request.sender_id и request.receiver_id
+    existing_request = db.query(models.FriendRequest).filter(
+        models.FriendRequest.sender_id == request.sender_id,
+        models.FriendRequest.receiver_id == request.receiver_id,
+        models.FriendRequest.status == "pending"
+    ).first()
+    if existing_request:
+        raise HTTPException(status_code=400, detail="Friend request already sent")
+
+    # Создание нового запроса на дружбу
+    friend_request = models.FriendRequest(sender_id=request.sender_id, receiver_id=request.receiver_id)
+    db.add(friend_request)
+    db.commit()
+    db.refresh(friend_request)
+    return {"message": "Friend request sent successfully"}
 
 
 @app.post("/messages/", response_model=schemas.MessageResponse)
@@ -196,3 +241,35 @@ def get_messages(
 
     return message_responses
 
+@app.put("/friend_requests/{request_id}")
+def respond_to_friend_request(request_id: int, status: str, db: Session = Depends(get_db)):
+    # Поиск запроса на добавление в друзья
+    friend_request = db.query(models.FriendRequest).filter(models.FriendRequest.id == request_id).first()
+
+    if not friend_request:
+        raise HTTPException(status_code=404, detail="Friend request not found")
+
+    if status not in ["accepted", "rejected"]:
+        raise HTTPException(status_code=400, detail="Invalid status")
+
+    # Обновление статуса запроса
+    friend_request.status = status
+    db.commit()
+
+    # Если запрос принят, добавляем запись в таблицу Friendship
+    if status == "accepted":
+        # Создание взаимной дружбы (две записи для каждого пользователя)
+        friendship1 = models.Friendship(
+            user_id=friend_request.sender_id,
+            friend_id=friend_request.receiver_id
+        )
+        friendship2 = models.Friendship(
+            user_id=friend_request.receiver_id,
+            friend_id=friend_request.sender_id
+        )
+        db.add_all([friendship1, friendship2])
+        db.commit()
+        return {"message": "Friend request accepted, friendship created"}
+
+    # Если запрос отклонен, возвращаем сообщение об успешном отклонении
+    return {"message": f"Friend request {status}"}
