@@ -1,77 +1,22 @@
-import asyncio
-import aiohttp
 import logging
-from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QMessageBox, QListWidget, \
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QListWidget, \
     QListWidgetItem, QSplitter, QLabel
-from PyQt5.QtGui import QFont
+from async_request_thread import AsyncRequestThread
+from message_widget import MessageWidget
 
 # Настройка логирования
 logging.basicConfig(level=logging.ERROR, format="%(asctime)s - %(levelname)s - %(message)s")
-
-
-class AsyncRequestThread(QThread):
-    finished = pyqtSignal(object)  # Передача данных обратно в основной поток
-
-    def __init__(self, url, method="get", params=None, json=None):
-        super().__init__()
-        self.url = url
-        self.method = method
-        self.params = params
-        self.json = json
-
-    async def make_request(self):
-        async with aiohttp.ClientSession() as session:
-            try:
-                if self.method == "get":
-                    async with session.get(self.url, params=self.params) as response:
-                        data = await response.json()
-                elif self.method == "post":
-                    async with session.post(self.url, json=self.json) as response:
-                        data = await response.json()
-                elif self.method == "put":
-                    async with session.put(self.url, json=self.json) as response:
-                        data = await response.json()
-                else:
-                    data = None
-                return data
-            except aiohttp.ClientError as e:
-                logging.error(f"Request failed: {e}")
-                return None
-
-    def run(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        data = loop.run_until_complete(self.make_request())
-        self.finished.emit(data)
-
-
-class MessageWidget(QWidget):
-    def __init__(self, text, is_sender):
-        super().__init__()
-        layout = QHBoxLayout()
-
-        label = QLabel(text)
-        label.setWordWrap(True)
-        label.setFont(QFont("Arial", 12))
-
-        if is_sender:
-            label.setStyleSheet("background-color: #00a86b; padding: 10px; border-radius: 10px;")
-            layout.addWidget(label, alignment=Qt.AlignRight)
-        else:
-            label.setStyleSheet("background-color: #00754a; padding: 10px; border-radius: 10px;")
-            layout.addWidget(label, alignment=Qt.AlignLeft)
-
-        self.setLayout(layout)
 
 
 class MainWindow(QWidget):
     def __init__(self, user_id):
         super().__init__()
         self.user_id = user_id
-        self.friends = set()
+        self.friends = []
         self.selected_contact_id = None
         self.processed_request_ids = set()
+        self.name_to_id_map = {}  # Добавлено для сопоставления имен и ID
         self.initUI()
         self.load_contacts()
 
@@ -82,7 +27,7 @@ class MainWindow(QWidget):
 
         contact_layout = QVBoxLayout()
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Search users...")
+        self.search_input.setPlaceholderText("Поиск пользователей...")
         self.search_input.textChanged.connect(self.search_users)
         contact_layout.addWidget(self.search_input)
 
@@ -94,9 +39,15 @@ class MainWindow(QWidget):
         self.chat_display = QListWidget()
         chat_layout.addWidget(self.chat_display)
 
+        # Добавляем QLabel для отображения ошибок
+        self.error_label = QLabel()
+        self.error_label.setStyleSheet("color: red;")
+        self.error_label.hide()  # По умолчанию скрыт
+        chat_layout.addWidget(self.error_label)
+
         message_layout = QHBoxLayout()
         self.message_input = QLineEdit()
-        self.send_button = QPushButton("Send")
+        self.send_button = QPushButton("Отправить")
         self.send_button.clicked.connect(self.send_message)
         message_layout.addWidget(self.message_input)
         message_layout.addWidget(self.send_button)
@@ -114,6 +65,14 @@ class MainWindow(QWidget):
         main_layout.addWidget(splitter)
         self.setLayout(main_layout)
 
+    def show_error_message(self, message):
+        self.error_label.setText(message)
+        self.error_label.show()
+
+    def clear_error_message(self):
+        self.error_label.clear()
+        self.error_label.hide()
+
     def load_contacts(self):
         url = f"http://127.0.0.1:8000/users/{self.user_id}/friends/"
         self.contact_thread = AsyncRequestThread(url, method="get")
@@ -123,17 +82,23 @@ class MainWindow(QWidget):
     def update_contacts(self, data):
         if data and isinstance(data, list):  # Проверка, что data не None и это список
             self.contact_list.clear()
+            self.name_to_id_map = {}  # Очищаем словарь
+            self.friends = [friend['id'] for friend in data]  # Сохраняем список ID друзей
             for friend in data:
-                friend_item = QListWidgetItem(f"{friend['username']} (Friend)")
+                friend_item = QListWidgetItem(f"{friend['username']} (Друг)")
                 self.contact_list.addItem(friend_item)
-                self.friends.add(friend['id'])
+                self.name_to_id_map[friend['username']] = friend['id']  # Сопоставляем имя и ID
+            self.clear_error_message()
         else:
-            QMessageBox.warning(self, "Error", "Failed to load contacts.")
+            self.show_error_message("Не удалось загрузить контакты.")
 
     def on_contact_selected(self, item):
-        selected_username = item.text()
-        self.selected_contact_id = next((user['id'] for user in self.friends if user['username'] == selected_username), None)
-        self.load_messages()
+        selected_username = item.text().split(' (')[0]  # Извлекаем имя пользователя
+        self.selected_contact_id = self.name_to_id_map.get(selected_username)
+        if self.selected_contact_id:
+            self.load_messages()
+        else:
+            self.show_error_message("Контакт не найден.")
 
     def load_messages(self):
         if not self.selected_contact_id:
@@ -153,11 +118,19 @@ class MainWindow(QWidget):
             self.chat_display.clear()
             for message in messages:
                 is_sender = message["sender_id"] == self.user_id
-                sender_name = "You" if is_sender else message["sender_username"]
+                sender_name = "Вы" if is_sender else message["sender_username"]
                 text = f"{sender_name}: {message['content']}"
                 self.add_message(text, is_sender)
+            self.clear_error_message()
         else:
-            QMessageBox.warning(self, "Error", "Failed to load messages.")
+            self.show_error_message("Не удалось загрузить сообщения.")
+
+    def add_message(self, text, is_sender):
+        message_widget = MessageWidget(text, is_sender)
+        item = QListWidgetItem()
+        item.setSizeHint(message_widget.sizeHint())
+        self.chat_display.addItem(item)
+        self.chat_display.setItemWidget(item, message_widget)
 
     def search_users(self):
         query = self.search_input.text()
@@ -172,26 +145,33 @@ class MainWindow(QWidget):
             for user in users:
                 user_item = QListWidgetItem()
                 if user['id'] in self.friends:
-                    user_item.setText(f"{user['username']} (Friend)")
+                    user_item.setText(f"{user['username']} (Друг)")
+                    self.contact_list.addItem(user_item)
+                    self.name_to_id_map[user['username']] = user['id']
                 else:
-                    add_friend_button = QPushButton("Add Friend")
-                    add_friend_button.clicked.connect(lambda _, uid=user['id']: self.add_friend(uid))
                     item_widget = QWidget()
                     layout = QHBoxLayout(item_widget)
-                    layout.addWidget(QLabel(user['username']))
+                    name_label = QLabel(user['username'])
+                    layout.addWidget(name_label)
+
+                    add_friend_button = QPushButton("Добавить в друзья")
+                    add_friend_button.clicked.connect(lambda _, uid=user['id']: self.add_friend(uid))
                     layout.addWidget(add_friend_button)
+
                     item_widget.setLayout(layout)
                     item = QListWidgetItem()
                     item.setSizeHint(item_widget.sizeHint())
                     self.contact_list.addItem(item)
                     self.contact_list.setItemWidget(item, item_widget)
+                    self.name_to_id_map[user['username']] = user['id']
+            self.clear_error_message()
         else:
-            QMessageBox.warning(self, "Error", "Failed to search users.")
+            self.show_error_message("Не удалось выполнить поиск пользователей.")
 
     def send_message(self):
         message = self.message_input.text()
         if not message or not self.selected_contact_id:
-            QMessageBox.warning(self, "Error", "Select a contact and enter a message")
+            self.show_error_message("Выберите контакт и введите сообщение.")
             return
 
         url = "http://127.0.0.1:8000/messages/"
@@ -206,10 +186,11 @@ class MainWindow(QWidget):
 
     def handle_send_message(self, response, message):
         if response is not None:  # Дополнительная проверка
-            self.add_message(f"You: {message}", is_sender=True)
+            self.add_message(f"Вы: {message}", is_sender=True)
             self.message_input.clear()
+            self.clear_error_message()
         else:
-            QMessageBox.warning(self, "Error", "Failed to send message.")
+            self.show_error_message("Не удалось отправить сообщение.")
 
     def load_friend_requests(self):
         url = f"http://127.0.0.1:8000/friend_requests/{self.user_id}"
@@ -223,8 +204,9 @@ class MainWindow(QWidget):
                 if req["id"] not in self.processed_request_ids:
                     self.show_friend_request(req["sender_id"], req["sender_username"])
                     self.processed_request_ids.add(req["id"])
+            self.clear_error_message()
         else:
-            QMessageBox.warning(self, "Error", "Failed to load friend requests.")
+            self.show_error_message("Не удалось загрузить запросы в друзья.")
 
     def accept_friend_request(self, sender_id):
         url = f"http://127.0.0.1:8000/friend_requests/{sender_id}?status=accepted"
@@ -240,21 +222,21 @@ class MainWindow(QWidget):
 
     def handle_friend_request_response(self, response, sender_id):
         if response:
-            QMessageBox.information(self, "Success", "Friend request processed successfully")
             self.load_contacts()  # Обновление списка друзей после принятия или отклонения запроса
             self.remove_friend_request_items(sender_id)  # Удаление UI-запроса
+            self.clear_error_message()
         else:
-            QMessageBox.warning(self, "Error", "Failed to process friend request")
+            self.show_error_message("Не удалось обработать запрос в друзья.")
 
     def show_friend_request(self, sender_id, sender_username):
         # Показ сообщения о запросе на дружбу в окне чата
-        request_message = f"{sender_username} has sent you a friend request."
+        request_message = f"{sender_username} отправил вам запрос в друзья."
         item = QListWidgetItem(request_message)
         self.chat_display.addItem(item)
 
         # Создание кнопок для принятия и отклонения запроса
-        accept_button = QPushButton("Accept")
-        reject_button = QPushButton("Reject")
+        accept_button = QPushButton("Принять")
+        reject_button = QPushButton("Отклонить")
 
         # Привязываем кнопки к функциям, передавая sender_id
         accept_button.clicked.connect(lambda _, uid=sender_id: self.accept_friend_request(uid))
@@ -288,9 +270,9 @@ class MainWindow(QWidget):
 
     def handle_add_friend(self, response):
         if response:
-            QMessageBox.information(self, "Success", "Friend request sent successfully")
+            self.show_error_message("Запрос в друзья отправлен.")
         else:
-            QMessageBox.warning(self, "Error", "Failed to send friend request")
+            self.show_error_message("Не удалось отправить запрос в друзья.")
 
     def remove_friend_request_items(self, sender_id):
         # Удаление элементов сообщения и кнопок, связанных с запросом на дружбу
