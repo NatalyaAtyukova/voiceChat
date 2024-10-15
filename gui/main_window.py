@@ -1,9 +1,49 @@
-import requests
+import asyncio
+import aiohttp
+import logging
+from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QMessageBox, QListWidget, \
     QListWidgetItem, QSplitter, QLabel
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QColor, QFont
-from websocket_listener import WebSocketListener
+from PyQt5.QtGui import QFont
+
+# Настройка логирования
+logging.basicConfig(level=logging.ERROR, format="%(asctime)s - %(levelname)s - %(message)s")
+
+
+class AsyncRequestThread(QThread):
+    finished = pyqtSignal(object)  # Передача данных обратно в основной поток
+
+    def __init__(self, url, method="get", params=None, json=None):
+        super().__init__()
+        self.url = url
+        self.method = method
+        self.params = params
+        self.json = json
+
+    async def make_request(self):
+        async with aiohttp.ClientSession() as session:
+            try:
+                if self.method == "get":
+                    async with session.get(self.url, params=self.params) as response:
+                        data = await response.json()
+                elif self.method == "post":
+                    async with session.post(self.url, json=self.json) as response:
+                        data = await response.json()
+                elif self.method == "put":
+                    async with session.put(self.url, json=self.json) as response:
+                        data = await response.json()
+                else:
+                    data = None
+                return data
+            except aiohttp.ClientError as e:
+                logging.error(f"Request failed: {e}")
+                return None
+
+    def run(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        data = loop.run_until_complete(self.make_request())
+        self.finished.emit(data)
 
 
 class MessageWidget(QWidget):
@@ -11,7 +51,6 @@ class MessageWidget(QWidget):
         super().__init__()
         layout = QHBoxLayout()
 
-        # Настройка выравнивания и фона для отправителя и получателя
         label = QLabel(text)
         label.setWordWrap(True)
         label.setFont(QFont("Arial", 12))
@@ -30,26 +69,17 @@ class MainWindow(QWidget):
     def __init__(self, user_id):
         super().__init__()
         self.user_id = user_id
-        self.friends = set()  # Множество для хранения ID друзей
+        self.friends = set()
         self.selected_contact_id = None
+        self.processed_request_ids = set()
         self.initUI()
         self.load_contacts()
-
-        # WebSocketListener для получения сообщений в реальном времени
-        self.websocket_listener = WebSocketListener(self.chat_display, self.user_id)
-        self.websocket_listener.start()
-
-        # Таймер для проверки новых запросов на дружбу
-        self.friend_request_timer = QTimer(self)
-        self.friend_request_timer.timeout.connect(self.load_friend_requests)
-        self.friend_request_timer.start(5000)  # Проверка каждые 30 секунд
 
     def initUI(self):
         self.setWindowTitle("Chat Application")
         self.setGeometry(100, 100, 800, 600)
         main_layout = QHBoxLayout(self)
 
-        # Левый раздел для контактов
         contact_layout = QVBoxLayout()
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search users...")
@@ -60,9 +90,8 @@ class MainWindow(QWidget):
         self.contact_list.itemClicked.connect(self.on_contact_selected)
         contact_layout.addWidget(self.contact_list)
 
-        # Правый раздел для чата
         chat_layout = QVBoxLayout()
-        self.chat_display = QListWidget()  # Используем QListWidget для отображения сообщений
+        self.chat_display = QListWidget()
         chat_layout.addWidget(self.chat_display)
 
         message_layout = QHBoxLayout()
@@ -73,7 +102,6 @@ class MainWindow(QWidget):
         message_layout.addWidget(self.send_button)
         chat_layout.addLayout(message_layout)
 
-        # Разделение окна на два сегмента
         splitter = QSplitter(Qt.Horizontal)
         contact_container = QWidget()
         contact_container.setLayout(contact_layout)
@@ -87,44 +115,41 @@ class MainWindow(QWidget):
         self.setLayout(main_layout)
 
     def load_contacts(self):
-        # Загрузка списка друзей
-        try:
-            response = requests.get(f"http://127.0.0.1:8000/users/{self.user_id}/friends/")
-            if response.status_code == 200:
-                friends = response.json()
-                self.contact_list.clear()
-                for friend in friends:
-                    friend_item = QListWidgetItem(f"{friend['username']} (Friend)")
-                    self.contact_list.addItem(friend_item)
-                    self.friends.add(friend['id'])  # Добавление в локальный список друзей
-            else:
-                QMessageBox.warning(self, "Error", f"Failed to load contacts: {response.status_code} - {response.text}")
-        except requests.exceptions.RequestException as e:
-            QMessageBox.warning(self, "Error", f"Failed to connect to server: {e}")
+        url = f"http://127.0.0.1:8000/users/{self.user_id}/friends/"
+        self.contact_thread = AsyncRequestThread(url, method="get")
+        self.contact_thread.finished.connect(self.update_contacts)
+        self.contact_thread.start()
+
+    def update_contacts(self, data):
+        if data and isinstance(data, list):  # Проверка, что data не None и это список
+            self.contact_list.clear()
+            for friend in data:
+                friend_item = QListWidgetItem(f"{friend['username']} (Friend)")
+                self.contact_list.addItem(friend_item)
+                self.friends.add(friend['id'])
+        else:
+            QMessageBox.warning(self, "Error", "Failed to load contacts.")
 
     def on_contact_selected(self, item):
-        # Обновление выбранного пользователя и загрузка его сообщений
         selected_username = item.text()
-        response = requests.get("http://127.0.0.1:8000/users/")
-        users = response.json()
-        for user in users:
-            if user['username'] == selected_username:
-                self.selected_contact_id = user['id']
-                break
+        self.selected_contact_id = next((user['id'] for user in self.friends if user['username'] == selected_username), None)
         self.load_messages()
 
     def load_messages(self):
-        # Загрузка сообщений с выбранным контактом
-        if self.selected_contact_id is None:
+        if not self.selected_contact_id:
             return
 
-        response = requests.get(
-            f"http://127.0.0.1:8000/messages", params={
-                "sender_id": self.user_id,
-                "receiver_id": self.selected_contact_id
-            })
-        if response.status_code == 200:
-            messages = response.json()
+        url = f"http://127.0.0.1:8000/messages"
+        params = {
+            "sender_id": self.user_id,
+            "receiver_id": self.selected_contact_id
+        }
+        self.message_thread = AsyncRequestThread(url, method="get", params=params)
+        self.message_thread.finished.connect(self.update_messages)
+        self.message_thread.start()
+
+    def update_messages(self, messages):
+        if messages:
             self.chat_display.clear()
             for message in messages:
                 is_sender = message["sender_id"] == self.user_id
@@ -132,24 +157,23 @@ class MainWindow(QWidget):
                 text = f"{sender_name}: {message['content']}"
                 self.add_message(text, is_sender)
         else:
-            QMessageBox.warning(self, "Error", f"Failed to load messages: {response.status_code} - {response.text}")
+            QMessageBox.warning(self, "Error", "Failed to load messages.")
 
     def search_users(self):
-        # Поиск всех пользователей и отображение их с кнопкой "Добавить в друзья"
         query = self.search_input.text()
-        response = requests.get(f"http://127.0.0.1:8000/users?query={query}")
-        if response.status_code == 200:
-            users = response.json()
+        url = f"http://127.0.0.1:8000/users?query={query}"
+        self.search_thread = AsyncRequestThread(url, method="get")
+        self.search_thread.finished.connect(self.update_search_results)
+        self.search_thread.start()
+
+    def update_search_results(self, users):
+        if users:
             self.contact_list.clear()
             for user in users:
-                # Создание элемента для каждого пользователя
-                user_item = QListWidgetItem(f"{user['username']}")
-
-                # Проверка, является ли пользователь другом
+                user_item = QListWidgetItem()
                 if user['id'] in self.friends:
                     user_item.setText(f"{user['username']} (Friend)")
                 else:
-                    # Если не друг, добавляем кнопку "Добавить"
                     add_friend_button = QPushButton("Add Friend")
                     add_friend_button.clicked.connect(lambda _, uid=user['id']: self.add_friend(uid))
                     item_widget = QWidget()
@@ -162,84 +186,81 @@ class MainWindow(QWidget):
                     self.contact_list.addItem(item)
                     self.contact_list.setItemWidget(item, item_widget)
         else:
-            QMessageBox.warning(self, "Error", "Failed to search users")
+            QMessageBox.warning(self, "Error", "Failed to search users.")
 
     def send_message(self):
-        # Отправка сообщения выбранному контакту
         message = self.message_input.text()
-        if not message or self.selected_contact_id is None:
+        if not message or not self.selected_contact_id:
             QMessageBox.warning(self, "Error", "Select a contact and enter a message")
             return
 
-        response = requests.post("http://127.0.0.1:8000/messages/", json={
+        url = "http://127.0.0.1:8000/messages/"
+        data = {
             "sender_id": self.user_id,
             "receiver_id": self.selected_contact_id,
             "content": message
-        })
-        if response.status_code == 200:
+        }
+        self.send_thread = AsyncRequestThread(url, method="post", json=data)
+        self.send_thread.finished.connect(lambda response: self.handle_send_message(response, message))
+        self.send_thread.start()
+
+    def handle_send_message(self, response, message):
+        if response is not None:  # Дополнительная проверка
             self.add_message(f"You: {message}", is_sender=True)
             self.message_input.clear()
         else:
-            QMessageBox.warning(self, "Error", "Failed to send message")
-
-    def add_message(self, text, is_sender):
-        # Добавление сообщения в чат
-        message_widget = MessageWidget(text, is_sender)
-        list_item = QListWidgetItem(self.chat_display)
-        list_item.setSizeHint(message_widget.sizeHint())
-        self.chat_display.addItem(list_item)
-        self.chat_display.setItemWidget(list_item, message_widget)
-
-    def load_contacts(self):
-        # Загрузка списка друзей
-        try:
-            response = requests.get(f"http://127.0.0.1:8000/users/{self.user_id}/friends/")
-            if response.status_code == 200:
-                friends = response.json()
-                self.contact_list.clear()
-                for friend in friends:
-                    friend_item = QListWidgetItem(f"{friend['username']} (Friend)")
-                    self.contact_list.addItem(friend_item)
-                    self.friends.add(friend['id'])  # Добавление в локальный список друзей
-            else:
-                QMessageBox.warning(self, "Error", f"Failed to load contacts: {response.status_code} - {response.text}")
-        except requests.exceptions.RequestException as e:
-            QMessageBox.warning(self, "Error", f"Failed to connect to server: {e}")
+            QMessageBox.warning(self, "Error", "Failed to send message.")
 
     def load_friend_requests(self):
-        # Track processed request IDs to avoid duplicate display
-        if not hasattr(self, 'processed_request_ids'):
-            self.processed_request_ids = set()
+        url = f"http://127.0.0.1:8000/friend_requests/{self.user_id}"
+        self.friend_request_thread = AsyncRequestThread(url, method="get")
+        self.friend_request_thread.finished.connect(self.update_friend_requests)
+        self.friend_request_thread.start()
 
-        response = requests.get(f"http://127.0.0.1:8000/friend_requests/{self.user_id}")
-        if response.status_code == 200:
-            friend_requests = response.json()
+    def update_friend_requests(self, friend_requests):
+        if friend_requests:
             for req in friend_requests:
                 if req["id"] not in self.processed_request_ids:
                     self.show_friend_request(req["sender_id"], req["sender_username"])
                     self.processed_request_ids.add(req["id"])
         else:
-            QMessageBox.warning(self, "Error", "Failed to load friend requests")
+            QMessageBox.warning(self, "Error", "Failed to load friend requests.")
+
+    def accept_friend_request(self, sender_id):
+        url = f"http://127.0.0.1:8000/friend_requests/{sender_id}?status=accepted"
+        self.accept_request_thread = AsyncRequestThread(url, method="put")
+        self.accept_request_thread.finished.connect(lambda response: self.handle_friend_request_response(response, sender_id))
+        self.accept_request_thread.start()
+
+    def reject_friend_request(self, sender_id):
+        url = f"http://127.0.0.1:8000/friend_requests/{sender_id}?status=rejected"
+        self.reject_request_thread = AsyncRequestThread(url, method="put")
+        self.reject_request_thread.finished.connect(lambda response: self.handle_friend_request_response(response, sender_id))
+        self.reject_request_thread.start()
+
+    def handle_friend_request_response(self, response, sender_id):
+        if response:
+            QMessageBox.information(self, "Success", "Friend request processed successfully")
+            self.load_contacts()  # Обновление списка друзей после принятия или отклонения запроса
+            self.remove_friend_request_items(sender_id)  # Удаление UI-запроса
+        else:
+            QMessageBox.warning(self, "Error", "Failed to process friend request")
 
     def show_friend_request(self, sender_id, sender_username):
-        # Dictionary to track request items by sender_id
-        if not hasattr(self, 'friend_request_items'):
-            self.friend_request_items = {}
-
-        # Show friend request message in chat display
+        # Показ сообщения о запросе на дружбу в окне чата
         request_message = f"{sender_username} has sent you a friend request."
         item = QListWidgetItem(request_message)
         self.chat_display.addItem(item)
 
-        # Accept and reject buttons
+        # Создание кнопок для принятия и отклонения запроса
         accept_button = QPushButton("Accept")
         reject_button = QPushButton("Reject")
 
-        # Connect buttons and pass sender_id to the functions
+        # Привязываем кнопки к функциям, передавая sender_id
         accept_button.clicked.connect(lambda _, uid=sender_id: self.accept_friend_request(uid))
         reject_button.clicked.connect(lambda _, uid=sender_id: self.reject_friend_request(uid))
 
-        # Add buttons to display in the chat
+        # Создание виджета для кнопок
         layout = QHBoxLayout()
         layout.addWidget(accept_button)
         layout.addWidget(reject_button)
@@ -250,66 +271,30 @@ class MainWindow(QWidget):
         self.chat_display.addItem(button_item)
         self.chat_display.setItemWidget(button_item, button_widget)
 
-        # Track both the message and button items to remove them later
+        # Добавление в словарь для последующего удаления
+        if not hasattr(self, 'friend_request_items'):
+            self.friend_request_items = {}
         self.friend_request_items[sender_id] = (item, button_item)
 
-    def accept_friend_request(self, sender_id):
-        response = requests.put(f"http://127.0.0.1:8000/friend_requests/{sender_id}?status=accepted")
-        if response.status_code == 200:
-            QMessageBox.information(self, "Success", "Friend request accepted")
-            self.load_contacts()  # Refresh the friend list after accepting
-            self.remove_friend_request_items(sender_id)  # Remove request UI
-        else:
-            QMessageBox.warning(self, "Error",
-                                f"Failed to accept friend request: {response.status_code} - {response.text}")
+    def add_friend(self, user_id):
+        url = f"http://127.0.0.1:8000/friend_requests/"
+        data = {
+            "sender_id": self.user_id,
+            "receiver_id": user_id
+        }
+        self.add_friend_thread = AsyncRequestThread(url, method="post", json=data)
+        self.add_friend_thread.finished.connect(lambda response: self.handle_add_friend(response))
+        self.add_friend_thread.start()
 
-    def reject_friend_request(self, sender_id):
-        response = requests.put(f"http://127.0.0.1:8000/friend_requests/{sender_id}?status=rejected")
-        if response.status_code == 200:
-            QMessageBox.information(self, "Success", "Friend request rejected")
-            self.remove_friend_request_items(sender_id)  # Remove request UI
+    def handle_add_friend(self, response):
+        if response:
+            QMessageBox.information(self, "Success", "Friend request sent successfully")
         else:
-            QMessageBox.warning(self, "Error",
-                                f"Failed to reject friend request: {response.status_code} - {response.text}")
+            QMessageBox.warning(self, "Error", "Failed to send friend request")
 
     def remove_friend_request_items(self, sender_id):
-        # Remove the message and button items related to this friend request
+        # Удаление элементов сообщения и кнопок, связанных с запросом на дружбу
         if sender_id in self.friend_request_items:
             request_message_item, button_item = self.friend_request_items.pop(sender_id)
             self.chat_display.takeItem(self.chat_display.row(request_message_item))
             self.chat_display.takeItem(self.chat_display.row(button_item))
-
-    def search_users(self):
-        query = self.search_input.text()
-        response = requests.get(f"http://127.0.0.1:8000/users?query={query}")
-        if response.status_code == 200:
-            users = response.json()
-            self.contact_list.clear()
-            for user in users:
-                user_item = QListWidgetItem()
-                if user['id'] in self.friends:
-                    user_item.setText(f"{user['username']} (Friend)")
-                else:
-                    add_friend_button = QPushButton("Add Friend")
-                    add_friend_button.clicked.connect(lambda _, uid=user['id']: self.send_friend_request(uid))
-                    item_widget = QWidget()
-                    layout = QHBoxLayout(item_widget)
-                    layout.addWidget(QLabel(user['username']))
-                    layout.addWidget(add_friend_button)
-                    item_widget.setLayout(layout)
-                    item = QListWidgetItem()
-                    item.setSizeHint(item_widget.sizeHint())
-                    self.contact_list.addItem(item)
-                    self.contact_list.setItemWidget(item, item_widget)
-        else:
-            QMessageBox.warning(self, "Error", "Failed to search users")
-
-    def send_friend_request(self, user_id):
-        response = requests.post(f"http://127.0.0.1:8000/friend_requests/", json={
-            "sender_id": self.user_id,
-            "receiver_id": user_id
-        })
-        if response.status_code == 200:
-            QMessageBox.information(self, "Success", "Friend request sent successfully")
-        else:
-            QMessageBox.warning(self, "Error", f"Failed to send friend request")
